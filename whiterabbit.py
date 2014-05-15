@@ -6,24 +6,25 @@ from bson.json_util import dumps
 """
 	Generic Use:
 
-		from whiterabbit import WhiteRabbit, Sum, Avg, Min, Max, Count, SubJoin
+		from fimedlabs.reveal.whiterabbit2 import WhiteRabbit, Sum, Avg, Min, Max, Count, SubJoin
 
 	BEGIN SETTINGS
 """
 
-connection = pymongo.MongoClient('URL',27017)
-db_name = 'dbname'
+connection = pymongo.MongoClient('mongodb.fimedlabs.com',27017)
+db_name = 'refdata'
 
 # Use this function to modify all queries that are sent to the database before they are sent.
 def modify_query(obj):
 	if 'typeValues' in obj:
-		size = len(obj['typeValues'])
-		for i in xrange(size):
-			for j in xrange(len(obj['typeValues'][i])):
-				obj['typeValues.'+str(i)+'.'+str(j)] = obj['typeValues'][i][j]
-		obj['typeValues'] = {
-			'$size': size
-		}
+		if type(obj['typeValues']) == list:
+			size = len(obj['typeValues'])
+			for i in xrange(size):
+				for j in xrange(len(obj['typeValues'][i])):
+					obj['typeValues.'+str(i)+'.'+str(j)] = obj['typeValues'][i][j]
+			obj['typeValues'] = {
+				'$size': size
+			}
 	return obj
 
 # Use this function to take in a key value and return True/False depending on whether or not that key should be an ObjectId.
@@ -41,12 +42,16 @@ class WhiteRabbit:
 
 	"""
 
-	def __init__(self, require={}):
+	def __init__(self, *args, **kwargs):
+		require = kwargs.pop('require', {})
+		trending = kwargs.pop('trending', {})
+
 		self._client = connection
 		self._db_name = db_name
 		self._db = self._client[self._db_name]
 		self._inserts = {}
 		self._require = require
+		self._trending = trending
 
 	def require(self, n=None):
 		if n:
@@ -63,8 +68,8 @@ class WhiteRabbit:
 		else:
 			return self._db
 
-	def find(self, collection="", query={}, require=True, modify=True, projection=None, distinctList=None):
-		query = _modify_obj(self._require, query, modify_obj=modify, useRequires=require)
+	def _innerFind(self, collection="", query={}, require=True, modify=True, projection=None, distinctList=None, trending=None):
+		query = _modify_obj(self._require, query, modify_obj=modify, useRequires=require, trending=trending)
 		collection = self._db[collection]
 		results = collection.find(query)
 
@@ -77,9 +82,22 @@ class WhiteRabbit:
 			results = results.distinct(distinctList)
 			return results
 
-		return self.toWhiteRabbitList(results)
+		return self.toWhiteRabbitList(results, trending=trending)
 
-	def findOne(self, collection="", query={}, require=True, modify=True, projection=None):
+	def find(self, collection="", query={}, require=True, modify=True, projection=None, distinctList=None, trending=None):
+		if self._trending or trending:
+			if trending:
+				useTrending = trending
+			else:
+				useTrending = self._trending
+			results = {}
+			for key, value in useTrending.iteritems():
+				results[key] = self._innerFind(collection=collection, query=query, require=require, modify=modify, projection=projection, distinctList=distinctList, trending=value)
+			return TrendingWhiteRabbitList(results)
+		else:
+			return self._innerFind(collection=collection, query=query, require=require, modify=modify, projection=projection, distinctList=distinctList)
+
+	def findOne(self, collection="", query={}, require=True, modify=True, projection=None, trending=None):
 		query = _modify_obj(self._require, query, modify_obj=modify, useRequires=require)
 		collection = self._db[collection]
 		result = collection.find_one(query)
@@ -87,8 +105,11 @@ class WhiteRabbit:
 			result = _store({},projection,result)
 		return result
 
-	def toWhiteRabbitList(self, l):
-		return WhiteRabbitList(l,self._db,self._require)
+	def toTrendingWhiteRabbitList(self, results):
+		return TrendingWhiteRabbitList(results)
+
+	def toWhiteRabbitList(self, l, trending=None):
+		return WhiteRabbitList(l,self._db,self._require, trending)
 
 	def listQueryStart(self,on):
 		return WhiteRabbitListQuery(self._db_name, on, self._require)
@@ -207,12 +228,14 @@ class WhiteRabbitListQuery:
 
 		return WhiteRabbitList(results,self._db,self._require)
 
-class WhiteRabbitList(list):
+class TrendingWhiteRabbitList:
 
-	def __init__(self,*args,**kwargs):
-		super(WhiteRabbitList, self).__init__(args[0])
-		self.connection = args[1]
-		self.require = args[2]
+	"""
+
+	"""
+
+	def __init__(self, results):
+		self.results = results
 
 	def aggregate(self, *args, **kwargs):
 		leftKey = kwargs.pop('leftKey',"_id")
@@ -223,10 +246,81 @@ class WhiteRabbitList(list):
 		require = kwargs.pop('require', True)
 		modify = kwargs.pop('modify', True)
 		subJoin = kwargs.pop('subJoin', None)
+		trending = kwargs.pop('trending', None)
+
+		for key, value in self.results.iteritems():
+			print key
+			passTrending = None
+			if key in trending:
+				passTrending = trending[key]
+			myquery = copy.deepcopy(query)
+			self.results[key].aggregate(*args, leftKey=leftKey, rightKey=rightKey, emitRightKey=emitRightKey, collection=collection, query=myquery, require=require, modify=modify, subJoin=subJoin, trending=passTrending)
+
+		return self
+
+	def join(self, *args, **kwargs):
+		leftKey = kwargs.pop('leftKey', '_id')
+		rightKey = kwargs.pop('rightKey', '_id')
+		emitRightKey = kwargs.pop('emitRightKey', None)
+		collection = kwargs.pop('collection', '')
+		query = kwargs.pop('query', {})
+		require = kwargs.pop('require', True)
+		modify = kwargs.pop('modify', True)
+		projection = kwargs.pop('projection', None)
+		storeTo = kwargs.pop('storeTo', None)
+		expectList = kwargs.pop('expectList', False)
+		listSortOn = kwargs.pop('listSortOn', '')
+		listSortDir = kwargs.pop('listSortDir', 'asc')
+		default = kwargs.pop('default', None)
+		subJoin = kwargs.pop('subJoin', None)
+		trending = kwargs.pop('trending', None)
+
+		for key, value in self.results.iteritems():
+			passTrending = None
+			if key in trending:
+				passTrending = trending[key]
+			myquery = copy.deepcopy(query)
+			self.results[key].aggregate(leftKey=leftKey, rightKey=rightKey, emitRightKey=emitRightKey, collection=collection, query=myquery, require=require, modify=modify, projection=projection, storeTo=storeTo, expectList=expectList, listSortOn=listSortOn, listSortDir=listSortDir, defaul=default, subJoin=subJoin, trending=passTrending)
+
+		return self
+
+	def sort(self, sortBy="", sortDir="asc", sortFunc=None):
+		for key, value in self.results.iteritems():
+			self.results[key].sort(sortBy, sortDir, sortFunc)
+
+	"""
+		I'm not actually sure how paginating trending is going to work, so commenting out for now.
+		Go through most recent? Then replace the previous sets to only include those??
+	"""
+	# def paginate(self, page=0,limit=50):
+	# 	for key, value in self.results.iteritems():
+	# 		self.results[key].paginate(page, limit)
+
+class WhiteRabbitList(list):
+
+	def __init__(self,*args,**kwargs):
+		super(WhiteRabbitList, self).__init__(args[0])
+		self.connection = args[1]
+		self.require = args[2]
+		try:
+			self.trending = args[3]
+		except:
+			self.trending = False
+
+	def aggregate(self, *args, **kwargs):
+		leftKey = kwargs.pop('leftKey',"_id")
+		rightKey = kwargs.pop('rightKey',"_id")
+		emitRightKey = kwargs.pop('emitRightKey',None)
+		collection = kwargs.pop('collection',"")
+		query = kwargs.pop('query',{})
+		require = kwargs.pop('require', True)
+		modify = kwargs.pop('modify', True)
+		subJoin = kwargs.pop('subJoin', None)
+		trending = kwargs.pop('trending', None)
 
 		ids = [_get(leftKey,item) for item in self]
 		collection = self.connection[collection]
-		query = _modify_obj(self.require, query, modify_obj=modify, useRequires=require)
+		query = _modify_obj(self.require, query, modify_obj=modify, useRequires=require, trending=trending)
 
 		if not subJoin:
 			query[rightKey] = {
@@ -271,6 +365,8 @@ class WhiteRabbitList(list):
 				else:
 					resultsDict[check] = [item]
 
+		print args
+
 		for agg in args:
 			options = agg.options
 			key = options['key']
@@ -278,6 +374,8 @@ class WhiteRabbitList(list):
 			default = options['default']
 			distinct = options['distinct']
 			type = options['type']
+
+			print "HERE"
 
 			if not key and type != "count":
 				raise WhiteRabbitJoinException("You must specify the key on which to perform this aggregation.")
@@ -400,7 +498,8 @@ class WhiteRabbitList(list):
 				if expectList:
 					resultsDict[check].append(item)
 				else:
-					raise WhiteRabbitJoinException("Your join returned multiple right-side objects for one left-side object without expectList being set to True.")
+
+					raise WhiteRabbitJoinException('Your join returned multiple right-side objects for one left-side object without expectList being set to True. %s' % check)
 			else:
 				if expectList:
 					resultsDict[check] = [item]
@@ -440,13 +539,16 @@ class WhiteRabbitList(list):
 
 		return self
 
-	def sort(self, sortBy="", sortDir="asc"):
+	def sort(self, sortBy="", sortDir="asc", sortFunc=None):
 		if sortBy:
 			if sortDir == "asc":
 				sortDir = False
 			else:
 				sortDir = True
-			new = WhiteRabbitList(sorted(self,key=lambda obj: _get(sortBy,obj),reverse=sortDir),self.connection,self.require)
+			if not sortFunc:
+				new = WhiteRabbitList(sorted(self,key=lambda obj: _get(sortBy,obj),reverse=sortDir),self.connection,self.require)
+			else:
+				new = WhiteRabbitList(sorted(self,key=lambda obj: sortFunc(_get(sortBy,obj)),reverse=sortDir),self.connection,self.require)
 			del self[:]
 			self.extend(new)
 		return self
@@ -625,17 +727,24 @@ def _and(l1,l2):
 def _or(l1,l2):
 	return list(set(l1+l2))
 
-def _modify_obj(require, obj, modify_obj=True, useRequires=True):
-		if useRequires:
-			for key, value in require.iteritems():
-				if key not in obj:
-					obj[key] = value
-		if modify_obj:
-			obj = modify_query(obj)
-		for key, value in obj.iteritems():
-			if type(value) is str and isID(key):
-				obj[key] = ObjectId(value)
-			if type(value) is list and isID(key):
-				for v in value:
-					v = ObjectId(value)
-		return obj
+def _modify_obj(require, obj, modify_obj=True, useRequires=True, trending=False):
+	print trending
+	if useRequires:
+		for key, value in require.iteritems():
+			if key not in obj:
+				obj[key] = value
+	if trending:
+		for key, value in trending.iteritems():
+			if key not in obj:
+				obj[key] = value
+				print key
+				print value
+	if modify_obj:
+		obj = modify_query(obj)
+	for key, value in obj.iteritems():
+		if type(value) is str and isID(key):
+			obj[key] = ObjectId(value)
+		if type(value) is list and isID(key):
+			for v in value:
+				v = ObjectId(value)
+	return obj
