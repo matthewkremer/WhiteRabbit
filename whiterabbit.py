@@ -11,8 +11,8 @@ from bson.json_util import dumps
 	BEGIN SETTINGS
 """
 
-connection = pymongo.MongoClient('mongodb.fimedlabs.com',27017)
-db_name = 'refdata'
+connection = pymongo.MongoClient('',0)
+db_name = ''
 
 # Use this function to modify all queries that are sent to the database before they are sent.
 def modify_query(obj):
